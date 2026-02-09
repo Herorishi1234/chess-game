@@ -33,33 +33,34 @@ export const setupChessHandlers = (io: Server) => {
     socket.on('joinGame', async (gameId: string) => {
       try {
         const game = await Game.findOne({ gameId });
-        
+
         if (!game) {
           socket.emit('error', { message: 'Game not found' });
           return;
         }
 
         socket.join(gameId);
-        
+
         // Update game if it's waiting for a second player
         if (game.status === 'waiting' && !game.blackPlayer) {
           game.blackPlayer = socket.data.userId as any;
           game.blackPlayerUsername = socket.data.username;
           game.status = 'inProgress';
           game.startedAt = new Date();
-          
+
           if (game.timeControl) {
             game.whiteTime = game.timeControl.initial * 1000;
             game.blackTime = game.timeControl.initial * 1000;
             game.lastMoveTime = new Date();
           }
-          
+
           await game.save();
         }
 
         // Send current game state to the joining player
         socket.emit('gameState', {
           gameId: game.gameId,
+          mode: game.mode,
           fen: game.fen,
           moves: game.moves,
           status: game.status,
@@ -89,16 +90,23 @@ export const setupChessHandlers = (io: Server) => {
 
     // Handle chess moves
     socket.on('makeMove', async (data: { gameId: string; from: string; to: string; promotion?: string }) => {
+      console.log(`[Move Debug] Received move: ${data.from}->${data.to} for game ${data.gameId}`);
       try {
         const { gameId, from, to, promotion } = data;
         const game = await Game.findOne({ gameId });
 
         if (!game) {
+          console.log('[Move Debug] Game not found');
           socket.emit('error', { message: 'Game not found' });
           return;
         }
 
+        console.log(`[Move Debug] Game state - Mode: ${game.mode}, Turn: ${game.currentTurn}, Status: ${game.status}`);
+        console.log(`[Move Debug] Players - White: ${game.whitePlayer}, Black: ${game.blackPlayer}`);
+        console.log(`[Move Debug] Requester - UserID: ${socket.data.userId}, Username: ${socket.data.username}`);
+
         if (game.status !== 'inProgress') {
+          console.log('[Move Debug] Game not in progress');
           socket.emit('error', { message: 'Game is not in progress' });
           return;
         }
@@ -106,11 +114,27 @@ export const setupChessHandlers = (io: Server) => {
         // Verify it's the player's turn
         const isWhite = game.whitePlayer?.toString() === socket.data.userId;
         const isBlack = game.blackPlayer?.toString() === socket.data.userId;
-        
-        if ((game.currentTurn === 'white' && !isWhite) || 
+
+        console.log(`[Move Debug] Auth - isWhite: ${isWhite}, isBlack: ${isBlack}`);
+
+        // Special handling for bot games
+        if (game.mode === 'bot' && game.currentTurn === 'black') {
+          console.log('[Move Debug] Bot turn handling');
+          // In bot mode, the white player (human) submits the moves for the bot
+          if (!isWhite) {
+            console.log('[Move Debug] Unauthorized bot move attempt');
+            socket.emit('error', { message: 'Not authorized to make bot moves' });
+            return;
+          }
+        } else {
+          console.log('[Move Debug] Normal turn handling');
+          // Normal multiplayer validation
+          if ((game.currentTurn === 'white' && !isWhite) ||
             (game.currentTurn === 'black' && !isBlack)) {
-          socket.emit('error', { message: 'Not your turn' });
-          return;
+            console.log('[Move Debug] Not player turn');
+            socket.emit('error', { message: 'Not your turn' });
+            return;
+          }
         }
 
         // Validate move with chess.js
@@ -118,6 +142,7 @@ export const setupChessHandlers = (io: Server) => {
         const move = chess.move({ from, to, promotion: promotion as any });
 
         if (!move) {
+          console.log('[Move Debug] Invalid chess move');
           socket.emit('error', { message: 'Invalid move' });
           return;
         }
@@ -125,27 +150,36 @@ export const setupChessHandlers = (io: Server) => {
         // Update time if time control is enabled
         if (game.timeControl && game.lastMoveTime) {
           const elapsed = Date.now() - game.lastMoveTime.getTime();
-          
+
           if (game.currentTurn === 'white' && game.whiteTime) {
             game.whiteTime = Math.max(0, game.whiteTime - elapsed + (game.timeControl.increment * 1000));
           } else if (game.currentTurn === 'black' && game.blackTime) {
             game.blackTime = Math.max(0, game.blackTime - elapsed + (game.timeControl.increment * 1000));
           }
-          
+
           game.lastMoveTime = new Date();
         }
 
         // Update game state
         game.fen = chess.fen();
         game.pgn = chess.pgn();
-        game.moves.push(move.san);
+        console.log(`[Move Debug] Moves before push: ${JSON.stringify(game.moves)}`);
+
+        if (move.san) {
+          game.moves.push(move.san);
+        } else {
+          console.error('[Move Debug] move.san is missing!', move);
+        }
+
+        console.log(`[Move Debug] Moves after push: ${JSON.stringify(game.moves)}`);
+
         game.currentTurn = chess.turn() === 'w' ? 'white' : 'black';
 
         // Check for game end conditions
         if (chess.isGameOver()) {
           game.status = 'finished';
           game.finishedAt = new Date();
-          
+
           if (chess.isCheckmate()) {
             game.result = chess.turn() === 'w' ? 'black' : 'white';
           } else {
@@ -185,7 +219,11 @@ export const setupChessHandlers = (io: Server) => {
           }
         }
 
-        await game.save();
+        // Force markModified just in case
+        game.markModified('moves');
+
+        const savedGame = await game.save();
+        console.log(`[Move Debug] Game saved. Moves in DB: ${JSON.stringify(savedGame.moves)}`);
 
         // Broadcast move to all players in the room
         io.to(gameId).emit('moveMade', {
@@ -219,7 +257,7 @@ export const setupChessHandlers = (io: Server) => {
     socket.on('resign', async (gameId: string) => {
       try {
         const game = await Game.findOne({ gameId });
-        
+
         if (!game || game.status !== 'inProgress') {
           socket.emit('error', { message: 'Cannot resign this game' });
           return;
@@ -269,13 +307,13 @@ export const setupChessHandlers = (io: Server) => {
     socket.on('offerDraw', async (gameId: string) => {
       try {
         const game = await Game.findOne({ gameId });
-        
+
         if (!game || game.status !== 'inProgress') {
           return;
         }
 
         const isPlayer = game.whitePlayer?.toString() === socket.data.userId ||
-                        game.blackPlayer?.toString() === socket.data.userId;
+          game.blackPlayer?.toString() === socket.data.userId;
 
         if (!isPlayer) {
           return;
@@ -294,7 +332,7 @@ export const setupChessHandlers = (io: Server) => {
     socket.on('acceptDraw', async (gameId: string) => {
       try {
         const game = await Game.findOne({ gameId });
-        
+
         if (!game || game.status !== 'inProgress') {
           return;
         }

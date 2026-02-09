@@ -22,7 +22,7 @@ export default function GamePage() {
 
   useEffect(() => {
     if (authLoading) return;
-    
+
     if (!user || !token) {
       router.push('/login');
       return;
@@ -68,6 +68,26 @@ export default function GamePage() {
     sock.on('connect_error', (err) => {
       console.error('Socket connection error:', err);
       setError('Failed to connect to game server');
+    });
+
+    sock.on('gameState', (gameState: GameType) => {
+      setGame(gameState);
+      setLoading(false);
+    });
+
+    sock.on('moveMade', (data: { game: GameType }) => {
+      console.log('GamePage received moveMade:', data);
+      // The server sends { game, move, fen, ... } but we need to check the structure
+      // Based on typical implementation, it might send the whole game object or we need to update it
+      // Let's assume data.game is the updated game object, or allow partial updates
+
+      // Actually, looking at server/src/sockets/chessHandler.ts (which we should verify), 
+      // it emits 'moveMade' with { gameId, move, fen, currentTurn, whiteTime, blackTime }.
+      // It DOES NOT send the full game object with moves array history in the 'moveMade' event usually.
+      // We might need to fetch the game again or manually update the moves list.
+
+      // Let's fetch the game state again to be sure we have the full history and sync
+      fetchGame();
     });
 
     return () => {
@@ -118,6 +138,7 @@ export default function GamePage() {
 
   return (
     <div className="min-h-screen py-8">
+      {console.log('GamePage Render - Game Object:', game)}
       <div className="max-w-7xl mx-auto px-4">
         <div className="mb-4">
           <button
@@ -145,7 +166,7 @@ export default function GamePage() {
           <div className="lg:w-80">
             <div className="bg-gray-800 rounded-lg p-6 text-white">
               <h2 className="text-xl font-bold mb-4">Game Info</h2>
-              
+
               <div className="space-y-3">
                 <div>
                   <p className="text-sm text-gray-400">Mode</p>

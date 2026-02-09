@@ -28,6 +28,14 @@ app.use(cors({
   origin: process.env.CLIENT_URL || 'http://localhost:3000',
   credentials: true
 }));
+
+
+// Request logging middleware
+app.use((req, res, next) => {
+  console.log(`${new Date().toISOString()} ${req.method} ${req.url}`);
+  next();
+});
+
 app.use(express.json());
 
 // MongoDB connection
@@ -188,10 +196,12 @@ app.post('/api/games/create', authMiddleware, async (req: AuthRequest, res) => {
 app.get('/api/games/:gameId', authMiddleware, async (req: AuthRequest, res) => {
   try {
     const game = await Game.findOne({ gameId: req.params.gameId });
-    
+
     if (!game) {
       return res.status(404).json({ error: 'Game not found' });
     }
+
+    console.log(`[API Debug] GET /games/${req.params.gameId} - Returning ${game.moves.length} moves: ${JSON.stringify(game.moves)}`);
 
     res.json({ game });
   } catch (error) {
@@ -203,12 +213,12 @@ app.get('/api/games/:gameId', authMiddleware, async (req: AuthRequest, res) => {
 // Get available games (waiting for players)
 app.get('/api/games', authMiddleware, async (req: AuthRequest, res) => {
   try {
-    const games = await Game.find({ 
+    const games = await Game.find({
       status: 'waiting',
       mode: 'multiplayer'
     })
-    .sort({ createdAt: -1 })
-    .limit(20);
+      .sort({ createdAt: -1 })
+      .limit(20);
 
     res.json({ games });
   } catch (error) {
@@ -226,8 +236,8 @@ app.get('/api/users/:userId/games', authMiddleware, async (req: AuthRequest, res
         { blackPlayer: req.params.userId }
       ]
     })
-    .sort({ createdAt: -1 })
-    .limit(50);
+      .sort({ createdAt: -1 })
+      .limit(50);
 
     res.json({ games });
   } catch (error) {
