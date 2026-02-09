@@ -1,0 +1,1 @@
+stockfish.js (placeholder - download from stockfishjs)
