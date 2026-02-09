@@ -58,10 +58,14 @@ export const useStockfish = () => {
             setIsReady(false);
           };
 
+          console.log('Stockfish worker created. Waiting for readyok...');
+
           workerRef.current.onmessage = (event) => {
             const message = event.data;
+            console.log('Stockfish says:', message);
 
             if (message === "readyok") {
+              console.log('Stockfish is READY');
               setIsReady(true);
             } else if (
               typeof message === "string" &&
@@ -72,17 +76,23 @@ export const useStockfish = () => {
                 /bestmove ([a-h][1-8])([a-h][1-8])([qrbn])?/,
               );
 
+              console.log('Stockfish debug: bestmove received. Match:', moveMatch ? 'Yes' : 'No', 'ResolveRef:', !!resolveRef.current);
+
               if (moveMatch && resolveRef.current) {
                 const move: StockfishMove = {
                   from: moveMatch[1],
                   to: moveMatch[2],
                   promotion: moveMatch[3] as "q" | "r" | "b" | "n" | undefined,
                 };
+                console.log('Stockfish debug: Resolving with move:', move);
                 resolveRef.current(move);
                 resolveRef.current = null;
               } else if (resolveRef.current) {
+                console.log('Stockfish debug: Resolving with null (no match)');
                 resolveRef.current(null);
                 resolveRef.current = null;
+              } else {
+                console.log('Stockfish debug: No resolve function available!');
               }
             }
           };
@@ -129,13 +139,23 @@ export const useStockfish = () => {
         workerRef.current.postMessage("go movetime 1000");
 
         // Timeout after 5 seconds
-        setTimeout(() => {
+        const timerCallback = () => {
           if (resolveRef.current) {
+            console.log('Stockfish debug: Timeout fired, clearing resolveRef');
             setIsThinking(false);
             resolveRef.current(null);
             resolveRef.current = null;
           }
-        }, 5000);
+        };
+
+        const timerId = setTimeout(timerCallback, 5000);
+
+        // Wrap the resolve function to clear timeout
+        const originalResolve = resolve;
+        resolveRef.current = (move: StockfishMove | null) => {
+          clearTimeout(timerId);
+          originalResolve(move);
+        };
       });
     },
     [isReady],

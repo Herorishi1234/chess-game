@@ -24,6 +24,7 @@ export default function ChessBoard({
   mode,
   onGameEnd
 }: ChessBoardProps) {
+  console.log('ChessBoard Props:', { gameId, mode, playerColor, initialFen });
   const [game, setGame] = useState(new Chess(initialFen));
   const [fen, setFen] = useState(initialFen);
   const [moveFrom, setMoveFrom] = useState('');
@@ -37,6 +38,17 @@ export default function ChessBoard({
   const [blackTime, setBlackTime] = useState<number | null>(null);
 
   const { isReady: stockfishReady, isThinking, getBestMove } = useStockfish();
+
+  // Effect to trigger bot move when it becomes ready (if it was skipped)
+  useEffect(() => {
+    if (mode === 'bot' && currentTurn !== playerColor && stockfishReady && !game.isGameOver() && !isThinking) {
+      // Small delay to ensure state is settled
+      const timer = setTimeout(() => {
+        makeBotMove(game.fen());
+      }, 500);
+      return () => clearTimeout(timer);
+    }
+  }, [stockfishReady, mode, currentTurn, playerColor, game, isThinking]);
 
   // Update turn indicator
   useEffect(() => {
@@ -58,6 +70,14 @@ export default function ChessBoard({
     });
 
     socket.on('moveMade', (data: any) => {
+      console.log('ChessBoard moveMade:', {
+        mode,
+        dataTurn: data.currentTurn,
+        playerColor,
+        stockfishReady,
+        gameOver: new Chess(data.fen).isGameOver() // Careful creating new instance here just for log
+      });
+
       const newGame = new Chess(data.fen);
       setGame(newGame);
       setFen(data.fen);
@@ -71,15 +91,19 @@ export default function ChessBoard({
       updateGameStatus(newGame, data);
 
       // If it's bot mode and it's the bot's turn, make a move
-      if (mode === 'bot' && data.currentTurn !== playerColor && stockfishReady && !newGame.isGameOver()) {
-        setTimeout(() => {
-          makeBotMove(data.fen);
-        }, 500);
+      if (mode === 'bot' && data.currentTurn !== playerColor && !newGame.isGameOver()) {
+        if (stockfishReady) {
+          setTimeout(() => {
+            makeBotMove(data.fen);
+          }, 500);
+        } else {
+          console.log('Bot should move but Stockfish NOT ready yet. Waiting for useEffect...');
+        }
       }
     });
 
     socket.on('gameEnded', (data: any) => {
-      const message = data.reason === 'resignation' 
+      const message = data.reason === 'resignation'
         ? `${data.winner} wins by resignation!`
         : `Game ended: ${data.result === 'draw' ? 'Draw' : data.result + ' wins'}`;
       setGameStatus(message);
@@ -131,18 +155,29 @@ export default function ChessBoard({
     if (!stockfishReady) return;
 
     const botMove = await getBestMove(currentFen, 15);
+    console.log('makeBotMove: getBestMove returned:', botMove);
+
     if (botMove && socket) {
+      console.log('Bot Move Decision:', botMove);
+      console.log('Emitting makeMove for bot:', {
+        gameId,
+        from: botMove.from,
+        to: botMove.to,
+        promotion: botMove.promotion
+      });
       socket.emit('makeMove', {
         gameId,
         from: botMove.from,
         to: botMove.to,
         promotion: botMove.promotion
       });
+    } else {
+      console.error('makeBotMove failed: ', { botMove, socketExists: !!socket });
     }
   };
 
   const getMoveOptions = useCallback((square: string) => {
-    const moves = game.moves({ square, verbose: true });
+    const moves = game.moves({ square: square as any, verbose: true }) as any[];
     if (moves.length === 0) {
       setOptionSquares({});
       return false;
@@ -152,7 +187,7 @@ export default function ChessBoard({
     moves.forEach((move) => {
       newSquares[move.to] = {
         background:
-          game.get(move.to) && game.get(move.to).color !== game.get(square).color
+          game.get(move.to as any) && game.get(move.to as any)?.color !== game.get(square as any)?.color
             ? 'radial-gradient(circle, rgba(0,0,0,.1) 85%, transparent 85%)'
             : 'radial-gradient(circle, rgba(0,0,0,.1) 25%, transparent 25%)',
         borderRadius: '50%'
@@ -171,7 +206,7 @@ export default function ChessBoard({
 
     // If no piece is selected yet
     if (!moveFrom) {
-      const piece = game.get(square);
+      const piece = game.get(square as any);
       if (piece && piece.color === (playerColor === 'white' ? 'w' : 'b')) {
         setMoveFrom(square);
         getMoveOptions(square);
@@ -180,12 +215,12 @@ export default function ChessBoard({
     }
 
     // Try to make a move
-    const moves = game.moves({ square: moveFrom, verbose: true });
+    const moves = game.moves({ square: moveFrom as any, verbose: true }) as any[];
     const foundMove = moves.find((m) => m.from === moveFrom && m.to === square);
 
     if (!foundMove) {
       // If clicking on another piece of the same color, select it instead
-      const piece = game.get(square);
+      const piece = game.get(square as any);
       if (piece && piece.color === (playerColor === 'white' ? 'w' : 'b')) {
         setMoveFrom(square);
         getMoveOptions(square);
@@ -249,6 +284,42 @@ export default function ChessBoard({
     return `${minutes}:${secs.toString().padStart(2, '0')}`;
   };
 
+  const onPieceDrop = (sourceSquare: string, targetSquare: string, piece: string) => {
+    // Only allow moves if it's my turn and not thinking
+    if (!isMyTurn || isThinking) return false;
+
+    // Validate move with chess.js
+    try {
+      // Create a temporary game instance to check valid moves
+      const tempGame = new Chess(game.fen());
+      const move = tempGame.move({
+        from: sourceSquare,
+        to: targetSquare,
+        promotion: 'q', // Always promote to queen for simplicity in drag-drop
+      });
+
+      // If move is invalid, returns null
+      if (!move) return false;
+
+      // If valid, make the move via socket
+      if (socket) {
+        socket.emit('makeMove', {
+          gameId,
+          from: sourceSquare,
+          to: targetSquare,
+          promotion: 'q',
+        });
+      }
+
+      // Optimistic update (will be overwritten by server response)
+      // We don't need to manually update state here because the socket event will do it,
+      // but returning true allows the piece to snap to the new square instantly.
+      return true;
+    } catch (e) {
+      return false;
+    }
+  };
+
   return (
     <div className="flex flex-col items-center gap-4 w-full max-w-2xl mx-auto">
       {/* Game Info */}
@@ -283,6 +354,7 @@ export default function ChessBoard({
         <Chessboard
           position={fen}
           onSquareClick={onSquareClick}
+          onPieceDrop={onPieceDrop}
           onSquareRightClick={onSquareRightClick}
           boardOrientation={playerColor}
           customSquareStyles={{
